@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
-import { History, PanelRightClose, Plus } from "lucide-react";
+import type { TFunction } from "i18next";
+import { Activity, History, PanelRightClose, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { TruncatedText } from "@/components/shared/TruncatedText";
@@ -8,13 +9,17 @@ import type { AttachedImage } from "@/hooks/useImageAttachments";
 import { useAppStore } from "@/stores/app-store";
 import { useAssistantStore } from "@/stores/assistant-store";
 import { useProjectsStore } from "@/stores/projects-store";
-import type { ImagePayload } from "@/types";
+import type { ContentBlock, ImagePayload, Turn } from "@/types";
 import { voidCall } from "@/utils/async";
 import { AgentComposer, type AgentComposerHandle } from "./AgentComposer";
+import { FreeImageResult } from "./FreeImageResult";
+import { FreeImageDialog } from "./FreeImageDialog";
+import { RunSettings } from "@/components/shared/RunSettings";
 import { AgentQuestionnaire } from "./AgentQuestionnaire";
 import { SessionHistory } from "./SessionHistory";
 import { sessionTitle } from "./session-title";
 import { TodoProgress } from "./TodoProgress";
+import { toolLabel } from "./chat/work-label";
 import { MessageFlow, type MessageFlowHandle } from "./chat/MessageFlow";
 
 
@@ -50,8 +55,12 @@ export function AgentCopilot() {
   const flowRef = useRef<MessageFlowHandle>(null);
   const composerRef = useRef<AgentComposerHandle>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [freeImageRequest, setFreeImageRequest] = useState<{ project: string; prompt: string } | null>(null);
+  const [freeImageTask, setFreeImageTask] = useState<{ project: string; task_id: string; draft_id: string } | null>(null);
 
   const isRunning = sessionStatus === "running";
+  const isWorking = isRunning || sending;
+  // 回复进行中输入框照常可用：此时发出的消息进排队消息托盘
   const inputDisabled = Boolean(pendingQuestion) || answeringQuestion || sending;
   const title =
     isDraftSession || !currentSessionId
@@ -121,7 +130,7 @@ export function AgentCopilot() {
           <h2 className="min-w-0 text-sm font-medium">
             <TruncatedText text={title} />
           </h2>
-          {(isRunning || sending) && (
+          {isWorking && (
             <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
               <span aria-hidden className="size-1.5 animate-breath rounded-full bg-primary" />
               {t("dashboard:thinking")}
@@ -154,13 +163,6 @@ export function AgentCopilot() {
       )}
 
       <TodoProgress turns={turns} draftTurn={draftTurn} />
-
-      {!pendingQuestion && error && (
-        <p role="alert" className="shrink-0 border-t border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {error}
-        </p>
-      )}
-
       {pendingQuestion && (
         <AgentQuestionnaire
           pendingQuestion={pendingQuestion}
@@ -170,6 +172,18 @@ export function AgentCopilot() {
         />
       )}
 
+      {!pendingQuestion && <>
+        {error && (
+          <p role="alert" className="shrink-0 border-t border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </p>
+        )}
+        {currentProjectName && <div className="px-3"><RunSettings projectName={currentProjectName} kind="chat" disabled={isWorking} /></div>}
+      </>}
+      {!pendingQuestion && freeImageTask && freeImageTask.project === currentProjectName && (
+        <FreeImageResult key={freeImageTask.task_id} projectName={currentProjectName} taskId={freeImageTask.task_id} draftId={freeImageTask.draft_id} />
+      )}
+      {!pendingQuestion && (isRunning || sending) && <AgentActivity turns={turns} draftTurn={draftTurn} />}
       <AgentComposer
         ref={composerRef}
         hidden={Boolean(pendingQuestion)}
@@ -178,11 +192,54 @@ export function AgentCopilot() {
         sending={sending}
         placeholder={isRunning ? t("dashboard:generating_queue_hint") : t("dashboard:input_placeholder")}
         onSend={handleSend}
+        onGenerateFreeImage={currentProjectName ? (prompt) => setFreeImageRequest({ project: currentProjectName, prompt }) : undefined}
         onInterrupt={() => voidCall(interrupt())}
         onWithdrawQueued={withdrawQueuedMessage}
         onResendQueued={handleResendQueued}
         onSendQueuedNow={handleSendQueuedNow}
       />
+      {freeImageRequest && freeImageRequest.project === currentProjectName && (
+        <FreeImageDialog
+          projectName={currentProjectName}
+          initialPrompt={freeImageRequest.prompt}
+          onClose={() => setFreeImageRequest(null)}
+          onSubmitted={(task) => { setFreeImageTask({ ...task, project: currentProjectName }); setFreeImageRequest(null); }}
+        />
+      )}
     </div>
   );
+}
+
+function AgentActivity({ turns, draftTurn }: { turns: Turn[]; draftTurn: Turn | null }) {
+  const { t } = useTranslation("dashboard");
+  const latest = [...turns, ...(draftTurn ? [draftTurn] : [])]
+    .flatMap((turn) => turn.content)
+    .reverse()
+    .find((block) =>
+      block.type === "tool_use" || block.type === "task_progress" || block.type === "skill_invocation" || block.type === "thinking",
+    );
+  const label = activityLabel(latest, t);
+
+  return (
+    <div className="agent-activity relative mx-3 mb-2 flex h-8 shrink-0 items-center gap-2 overflow-hidden rounded-md border border-border px-2.5 text-xs text-muted-foreground" role="status" aria-live="polite">
+      <Activity aria-hidden className="agent-activity-indicator size-3.5 shrink-0 text-primary" />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+    </div>
+  );
+}
+
+function activityLabel(block: ContentBlock | undefined, t: TFunction<"dashboard">): string {
+  if (!block) return t("activity_waiting");
+  switch (block.type) {
+    case "tool_use": {
+      const name = toolLabel(block.name ?? "", undefined, t, []).name;
+      return name === block.name || !name ? t("activity_running") : name;
+    }
+    case "task_progress":
+      return t("work_background_task");
+    case "skill_invocation":
+      return t(`skill_name_${(block.skill_name ?? "").replaceAll("-", "_")}`, { defaultValue: t("activity_running") });
+    default:
+      return t("activity_thinking");
+  }
 }
