@@ -345,7 +345,6 @@ class ProjectEventService:
         if channel is not None:
             channel.sse.broadcast(("task_progress", payload))
 
-
     def locate_items(self, project_name: str, ids: list[str]) -> list[dict[str, Any]]:
         channel = self._channels.get(project_name)
         return locate_items(channel.snapshot if channel else None, ids)
@@ -500,6 +499,7 @@ class ProjectEventService:
         ):
             change.update(
                 item_id=location["item_id"],
+                location_status=location["status"],
                 position=location["position"],
                 episode=change.get("episode") or location["episode"],
             )

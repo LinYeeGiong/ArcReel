@@ -1,3 +1,4 @@
+import type { ItemLocationStatus } from "./project";
 import type { PresentationResourceType } from "./presentation";
 
 export type ProjectEventSource = "webui" | "worker" | "filesystem";
@@ -54,6 +55,7 @@ export interface ProjectChange {
   episode?: number;
   item_id?: string | null;
   position?: number | null;
+  location_status?: ItemLocationStatus;
   task_type?: string;
   status?: string;
   focus?: ProjectChangeFocus | null;

@@ -127,7 +127,7 @@ function StudioWorkspace() {
     routeEpisodeRef.current = routeEpisode;
   }, [routeEpisode]);
   const { setCurrentProject, setProjectDetailLoading } = useProjectsStore();
-  const currentProjectData = useProjectsStore((s) => s.currentProjectData);
+  const currentProjectData = useProjectsStore((s) => s.currentProjectName === projectName ? s.currentProjectData : null);
   const { t } = useTranslation("onboarding");
   const tRef = useRef(t);
   useEffect(() => {
@@ -153,6 +153,7 @@ function StudioWorkspace() {
       };
     }
 
+    let disposed = false;
     setApiReadOnly(false);
     setProjectDetailLoading(true);
     setCurrentProject(projectName, null);
@@ -170,12 +171,12 @@ function StudioWorkspace() {
         onError: (err) =>
           useAppStore.getState().pushToast(tRef.current("dashboard:project_load_failed", { message: errMsg(err) }), "error"),
       })
-      .then((result) => {
-        if (result === "cancelled") return;
-        setProjectDetailLoading(false);
+      .then(() => {
+        if (!disposed) setProjectDetailLoading(false);
       });
 
     return () => {
+      disposed = true;
       setCurrentProject(null, null);
     };
   }, [projectName, setCurrentProject, setProjectDetailLoading]);

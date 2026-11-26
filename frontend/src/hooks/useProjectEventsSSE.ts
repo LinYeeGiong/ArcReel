@@ -244,6 +244,7 @@ function isWorkspaceEditing(hasUnsavedChanges: () => boolean): boolean {
 }
 
 interface PendingHiddenSync {
+  notifications: Array<() => void>;
   workspace: boolean;
   scope: ProjectRefreshScope | null;
   tasks: boolean;
@@ -259,6 +260,7 @@ interface PendingHiddenSync {
 
 function emptyHiddenSync(): PendingHiddenSync {
   return {
+    notifications: [],
     workspace: false,
     scope: null,
     tasks: false,
@@ -300,7 +302,7 @@ export function useProjectEventsSSE(projectName?: string | null): void {
   const sourceRef = useRef<SseStreamHandle | null>(null);
   const lastFingerprintRef = useRef<string | null>(null);
   const queuedFocusRef = useRef<WorkspaceNotificationTarget | null>(null);
-  const hiddenSyncRef = useRef<PendingHiddenSync>(emptyHiddenSync());
+  const hiddenSyncRef = useRef<PendingHiddenSync | null>(null);
 
   const executeFocus = useCallback(
     (target: WorkspaceNotificationTarget) => {
@@ -367,7 +369,7 @@ export function useProjectEventsSSE(projectName?: string | null): void {
     if (!projectName || typeof document === "undefined") return;
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible") return;
-      const pending = hiddenSyncRef.current;
+      const pending = hiddenSyncRef.current ??= emptyHiddenSync();
       const hasPending =
         pending.workspace ||
         pending.tasks ||
@@ -390,7 +392,9 @@ export function useProjectEventsSSE(projectName?: string | null): void {
         useItemLocationsStore.getState().notifySnapshotReady(projectName, pending.snapshotChanged);
       }
       if (pending.workspace) {
-        void refreshProject(pending.scope ?? { projectWide: true, assets: true });
+        void refreshProject(pending.scope ?? { projectWide: true, assets: true }).then((result) => {
+          if (result === "success") pending.notifications.forEach((notify) => notify());
+        });
       }
       if (pending.tasks) void useTasksStore.getState().refreshTasks();
       if (pending.usage) void useUsageHeaderStore.getState().refresh();
@@ -416,7 +420,7 @@ export function useProjectEventsSSE(projectName?: string | null): void {
         lastFingerprintRef.current = payload.fingerprint;
         const fingerprintChanged = Boolean(previousFingerprint && previousFingerprint !== payload.fingerprint);
         if (isDocumentHidden()) {
-          const pending = hiddenSyncRef.current;
+          const pending = hiddenSyncRef.current ??= emptyHiddenSync();
           pending.snapshotReady = true;
           pending.snapshotChanged ||= fingerprintChanged;
           if (fingerprintChanged) {
@@ -472,13 +476,16 @@ export function useProjectEventsSSE(projectName?: string | null): void {
           if (change.asset_fingerprints) {
             Object.assign(mergedFingerprints, change.asset_fingerprints);
           }
+          if (change.entity_type === "episode" && typeof change.episode === "number") {
+            structurallyChangedEpisodes.add(change.episode);
+          }
           if (SCRIPT_ITEM_ENTITY_TYPES.has(change.entity_type)) {
             if (change.position !== undefined) {
               directLocations.push({
                 episode: change.episode ?? null,
                 item_id: change.item_id ?? change.entity_id,
                 position: change.position,
-                status: change.position === null ? "deleted" : "found",
+                status: change.location_status ?? (change.position !== null ? "found" : change.action === "deleted" ? "deleted" : "unloaded"),
               });
             }
             if ((change.action === "created" || change.action === "deleted") && typeof change.episode === "number") {
@@ -553,29 +560,6 @@ export function useProjectEventsSSE(projectName?: string | null): void {
           hasCompletionEvent || hasBilledVoiceSampleTerminal || hasGridSplit || hasUsageRecord;
         const refreshScope = entityChanges.length > 0 ? deriveRefreshScope(entityChanges) : null;
 
-        if (isDocumentHidden()) {
-          const pending = hiddenSyncRef.current;
-          for (const key of invalidationKeys) pending.invalidationKeys.add(key);
-          if (hasTrash) pending.trash = true;
-          if (taskChanges.length > 0) pending.tasks = true;
-          if (hasReferenceUnitChange) pending.referenceUnits = true;
-          if (hasGridEvent) pending.grids = true;
-          if (hasUsageRecord || taskChanges.length > 0) pending.usage = true;
-          if (hasCostChange) pending.cost = true;
-          if (refreshScope) {
-            pending.workspace = true;
-            pending.scope = mergePendingScope(pending.scope, refreshScope);
-          }
-          return;
-        }
-
-        if (hasTrash) {
-          useAppStore.getState().invalidateTrash();
-        }
-        if (invalidationKeys.length > 0) {
-          invalidateEntities(invalidationKeys);
-        }
-
         const groupedChanges = sortGroupedChanges(groupChangesByType(entityChanges));
 
         const notifyChanges = entityChanges.length > 0 && payload.source !== "webui";
@@ -595,7 +579,52 @@ export function useProjectEventsSSE(projectName?: string | null): void {
               })
               .find(Boolean) ?? null;
 
-          queuedFocusRef.current = isWorkspaceEditing(hasUnsavedChanges) ? null : nextFocusTarget;
+          if (!isDocumentHidden()) queuedFocusRef.current = isWorkspaceEditing(hasUnsavedChanges) ? null : nextFocusTarget;
+        }
+
+        const deliverNotifications = () => {
+          if (disposed) return;
+          const { currentProjectData, currentScripts } = useProjectsStore.getState();
+          const episodeLedger = currentProjectData?.episodes ?? [];
+          for (const group of groupedChanges) {
+            if (!hasImportantChanges(group)) {
+              continue;
+            }
+            pushNotification(
+              formatGroupedNotificationText(group, tEventsRef.current, episodeLedger, currentScripts),
+              "success",
+            );
+          }
+          for (const { group, target } of workspaceNotifications) {
+            pushWorkspaceNotification({
+              text: formatGroupedDeferredText(group, tEventsRef.current, episodeLedger, currentScripts),
+              target,
+            });
+          }
+        };
+
+        if (isDocumentHidden()) {
+          const pending = hiddenSyncRef.current ??= emptyHiddenSync();
+          for (const key of invalidationKeys) pending.invalidationKeys.add(key);
+          if (hasTrash) pending.trash = true;
+          if (taskChanges.length > 0) pending.tasks = true;
+          if (hasReferenceUnitChange) pending.referenceUnits = true;
+          if (hasGridEvent) pending.grids = true;
+          if (hasUsageRecord || taskChanges.length > 0) pending.usage = true;
+          if (hasCostChange) pending.cost = true;
+          if (refreshScope) {
+            pending.workspace = true;
+            if (notifyChanges) pending.notifications.push(deliverNotifications);
+            pending.scope = mergePendingScope(pending.scope, refreshScope);
+          }
+          return;
+        }
+
+        if (hasTrash) {
+          useAppStore.getState().invalidateTrash();
+        }
+        if (invalidationKeys.length > 0) {
+          invalidateEntities(invalidationKeys);
         }
 
         if (taskChanges.length > 0) {
@@ -609,23 +638,7 @@ export function useProjectEventsSSE(projectName?: string | null): void {
         if (refreshScope) {
           void refreshProject(refreshScope).then((result) => {
             if (disposed || !notifyChanges || result !== "success") return;
-            const { currentProjectData, currentScripts } = useProjectsStore.getState();
-            const episodeLedger = currentProjectData?.episodes ?? [];
-            for (const group of groupedChanges) {
-              if (!hasImportantChanges(group)) {
-                continue;
-              }
-              pushNotification(
-                formatGroupedNotificationText(group, tEventsRef.current, episodeLedger, currentScripts),
-                "success",
-              );
-            }
-            for (const { group, target } of workspaceNotifications) {
-              pushWorkspaceNotification({
-                text: formatGroupedDeferredText(group, tEventsRef.current, episodeLedger, currentScripts),
-                target,
-              });
-            }
+            deliverNotifications();
           });
         }
 

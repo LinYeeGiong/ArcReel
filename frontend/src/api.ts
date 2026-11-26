@@ -1,3 +1,4 @@
+import { stripScriptsPrefix } from "@/utils/task-target";
 
 import type {
   CharacterDerivativeStatus,
@@ -530,9 +531,12 @@ class API {
 
   static async getWorkspace(
     name: string,
-    options: { signal?: AbortSignal } = {}
+    options: { signal?: AbortSignal; episodes?: readonly number[] } = {}
   ): Promise<WorkspaceResponse> {
-    return this.request(`/projects/${encodeURIComponent(name)}/workspace`, { signal: options.signal });
+    const params = new URLSearchParams();
+    for (const episode of [...new Set(options.episodes)].sort((a, b) => a - b)) params.append("episodes", String(episode));
+    const query = params.size ? `?${params}` : "";
+    return this.request(`/projects/${encodeURIComponent(name)}/workspace${query}`, { signal: options.signal });
   }
 
   static async getProject(
@@ -1351,7 +1355,7 @@ class API {
     scriptFile: string,
     options: { signal?: AbortSignal } = {}
   ): Promise<EpisodeScriptSnapshot> {
-    const normalized = scriptFile.replace(/^scripts\//, "");
+    const normalized = stripScriptsPrefix(scriptFile);
     return this.request(
       `/projects/${encodeURIComponent(projectName)}/scripts/${encodeURIComponent(normalized)}`,
       { signal: options.signal }

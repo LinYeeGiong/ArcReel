@@ -54,6 +54,8 @@ Dependencies point from `server/` to `lib/`. The core library owns domain logic 
 
 The workspace endpoint `GET /api/v1/projects/{name}/workspace` returns the project ledger, episode summaries, and asset fingerprints. Availability counts use manifest registration and file presence. Each episode reports its count of video units requiring replanning. Episode scripts and asset freshness come from their respective detail endpoints. The asset page can request `asset-sheets/status?include=derivative_references`. An incomplete scan returns `referenced: null` for derivatives without a known reference.
 
+For episode changes, clients pass repeated `episodes` query parameters. The response contains summary rows and media fingerprints for those episodes, with `episodes_summary` set to `null`. Clients merge the rows and recompute project totals.
+
 To locate visible items, send up to 200 IDs to `POST /api/v1/projects/{name}/item-locations`, for example `{"item_ids":["E2S01","S01"]}`. The response lists `items` in request order with one-based positions and a status of `found`, `deleted`, `ambiguous`, or `unloaded`. The index updates with the project event snapshot.
 
 ### Edit units and navigation guard {#edit-unit-and-leave-guard}

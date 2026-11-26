@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
+import { ApiRequestError } from "@/api/errors";
 import { API } from "@/api";
 import { useAppStore } from "@/stores/app-store";
 import { episodeScriptRevisionKey, useProjectsStore } from "@/stores/projects-store";
@@ -35,6 +36,55 @@ describe("projects-store refreshProject", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("merges an episode projection and falls back once when the ledger grows or the selection disappears", async () => {
+    const project: ProjectData = { ...makeProject("Demo"), episodes: [1, 2].map((episode) => ({
+      episode, title: String(episode), script_file: `scripts/episode_${episode}.json`,
+      status: "scripted", script_status: "generated",
+    })) };
+    const full = makeWorkspaceResponse(project, { "old.png": 1 });
+    const partial = makeWorkspaceResponse(project, { "new.png": 2 });
+    partial.summary.episodes_summary = null;
+    partial.summary.episodes = [{ ...partial.summary.episodes[0], status: "completed" }];
+    const fetch = vi.spyOn(API, "getWorkspace").mockResolvedValueOnce(full).mockResolvedValueOnce(partial);
+    const scope = { episodes: [1] };
+    const store = useProjectsStore.getState();
+    expect(await store.refreshProject("demo", { scope })).toBe("success");
+    expect(fetch.mock.calls[0][1]).toEqual({ signal: expect.any(AbortSignal) });
+    expect(await store.refreshProject("demo", { scope })).toBe("success");
+    expect(fetch.mock.calls[1][1]).toEqual({ episodes: [1], signal: expect.any(AbortSignal) });
+    const current = useProjectsStore.getState();
+    expect(current.currentProjectData?.status?.episodes_summary).toEqual({ total: 2, scripted: 2, in_production: 0, completed: 1 });
+    expect(current.currentProjectData?.episodes[1].status).toBe("scripted");
+    expect(current.assetFingerprints).toEqual({ "old.png": 1, "new.png": 2 });
+    const grown = { ...project, episodes: [...project.episodes, { ...project.episodes[0], episode: 3 }] };
+    fetch.mockResolvedValueOnce({ ...partial, project: grown }).mockResolvedValueOnce(makeWorkspaceResponse(grown));
+    expect(await store.refreshProject("demo", { scope })).toBe("success");
+    expect(fetch.mock.calls[3][1]).toEqual({ signal: expect.any(AbortSignal) });
+    expect(useProjectsStore.getState().currentProjectData?.episodes).toHaveLength(3);
+    fetch.mockRejectedValueOnce(new ApiRequestError("invalid", undefined, 400)).mockResolvedValueOnce(full);
+    expect(await store.refreshProject("demo", { scope })).toBe("success");
+    expect(fetch.mock.calls[5][1]).toEqual({ signal: expect.any(AbortSignal) });
+  });
+
+  it("widens the committed scope when the requested episode is absent from the local ledger", async () => {
+    const store = useProjectsStore.getState();
+    const response = makeWorkspaceResponse({
+      ...makeProject("Demo"),
+      episodes: [{ episode: 1, title: "EP1", script_file: "scripts/one.json", script_status: "generated" }],
+    });
+    const workspace = vi.spyOn(API, "getWorkspace").mockResolvedValue(response);
+    expect(await store.refreshProject("demo")).toBe("success");
+    const script = vi.spyOn(API, "getScript").mockResolvedValue({
+      script: { episode: 1, segments: [] } as never, revision: "r1",
+    });
+    await store.loadEpisodeScript("demo", 1, "one.json");
+    const revision = useProjectsStore.getState().projectWideRevisions.demo;
+    expect(await store.refreshProject("demo", { scope: { episodes: [2] } })).toBe("success");
+    expect(workspace).toHaveBeenLastCalledWith("demo", { signal: expect.any(AbortSignal) });
+    expect(useProjectsStore.getState().projectWideRevisions.demo).toBe(revision + 1);
+    expect(script).toHaveBeenCalledTimes(2);
   });
 
   it("空 name 直接返回 cancelled，不发请求", async () => {
@@ -452,6 +502,55 @@ describe("projects-store refreshProject", () => {
     expect(await pStaleA).toBe("cancelled");
   });
 
+  it.each([new Error("script reload failed"), new ApiRequestError("script missing", undefined, 404)])(
+    "活动剧本重读失败时写后刷新返回失败，并通知调用方（%s）", async (failure) => {
+      const project = makeWorkspaceResponse({
+        ...makeProject("Demo"),
+        episodes: [{ episode: 1, title: "EP1", script_file: "scripts/episode_1.json", script_status: "generated" }],
+      });
+      const store = useProjectsStore.getState();
+      store.setCurrentProject("demo", project.project);
+      vi.spyOn(API, "getWorkspace").mockResolvedValue(project);
+      vi.spyOn(API, "getScript")
+        .mockResolvedValueOnce({ script: { episode: 1, segments: [] } as never, revision: "old" })
+        .mockRejectedValueOnce(failure);
+      expect(await store.loadEpisodeScript("demo", 1, "episode_1.json")).toBe("success");
+
+      const onError = vi.fn();
+      expect(await store.refreshProject("demo", { onError })).toBe("failed");
+      expect(onError).toHaveBeenCalledWith(failure);
+      expect(useProjectsStore.getState().activeEpisodeScript.status).toBe("error");
+    },
+  );
+
+  it("账本确认同一绑定后路由复用先到的 404", async () => {
+    const store = useProjectsStore.getState();
+    store.setCurrentProject("demo", null);
+    const script = vi.spyOn(API, "getScript")
+      .mockRejectedValueOnce(new ApiRequestError("missing", undefined, 404))
+      .mockRejectedValueOnce(new ApiRequestError("unavailable", undefined, 503));
+    vi.spyOn(API, "getWorkspace").mockResolvedValue(makeWorkspaceResponse({
+      ...makeProject("Demo"),
+      episodes: [{ episode: 1, title: "EP1", script_file: "scripts/episode_1.json", script_status: "generated" }],
+    }));
+    await store.loadEpisodeScript("demo", 1, "episode_1.json", { speculative: true });
+    expect(await store.refreshProject("demo")).toBe("success");
+    expect(await store.loadEpisodeScript("demo", 1, "episode_1.json")).toBe("success");
+    expect(script).toHaveBeenCalledTimes(1);
+    expect(useProjectsStore.getState().activeEpisodeScript.status).toBe("missing");
+  });
+
+  it("初始账本失败时结束等待绑定的推测读取", async () => {
+    const store = useProjectsStore.getState();
+    store.setCurrentProject("demo", null);
+    vi.spyOn(API, "getScript").mockResolvedValue({ script: { episode: 1, segments: [] } as never, revision: "r1" });
+    vi.spyOn(API, "getWorkspace").mockRejectedValue(new Error("workspace failed"));
+    const read = store.loadEpisodeScript("demo", 1, "episode_1.json", { speculative: true });
+    expect(await store.refreshProject("demo")).toBe("failed");
+    expect(await read).toBe("cancelled");
+    expect(useProjectsStore.getState().currentScripts).toEqual({});
+  });
+
   it("按集加载剧本：绑定变更时丢弃旧脚本并拉取新绑定，作用域刷新仅推进对应集修订", async () => {
     const projectV1: ProjectData = {
       ...makeProject("Demo"),
@@ -467,11 +566,15 @@ describe("projects-store refreshProject", () => {
         { episode: 2, title: "EP2", script_file: "scripts/episode_2.json", script_status: "generated" },
       ],
     };
-    useProjectsStore.getState().setCurrentProject("demo", projectV1, {}, {});
+    const partial = makeWorkspaceResponse(projectV2);
+    partial.summary.episodes_summary = null;
+    partial.summary.episodes = partial.summary.episodes.filter((row) => row.episode === 1);
+    const workspace = vi.spyOn(API, "getWorkspace").mockResolvedValueOnce(makeWorkspaceResponse(projectV1))
+      .mockResolvedValueOnce(partial);
+    expect(await useProjectsStore.getState().refreshProject("demo")).toBe("success");
     const getScriptSpy = vi.spyOn(API, "getScript").mockImplementation((_proj, file) =>
       Promise.resolve({ script: { episode: 1, segments: [], file } as never, revision: `rev:${file}` }),
     );
-    vi.spyOn(API, "getWorkspace").mockResolvedValue(makeWorkspaceResponse(projectV2));
 
     expect(await useProjectsStore.getState().loadEpisodeScript("demo", 1, "episode_1.json")).toBe("success");
     expect(Object.keys(useProjectsStore.getState().currentScripts)).toEqual(["episode_1.json"]);
@@ -480,6 +583,7 @@ describe("projects-store refreshProject", () => {
     const beforeEp2 = useProjectsStore.getState().episodeRevisions[episodeScriptRevisionKey("demo", 2)] ?? 0;
     expect(await useProjectsStore.getState().refreshProject("demo", { scope: { episodes: [1] } })).toBe("success");
 
+    expect(workspace).toHaveBeenLastCalledWith("demo", { episodes: [1], signal: expect.any(AbortSignal) });
     expect(useProjectsStore.getState().projectWideRevisions.demo ?? 0).toBe(beforeWide);
     expect(useProjectsStore.getState().episodeRevisions[episodeScriptRevisionKey("demo", 2)] ?? 0).toBe(beforeEp2);
     expect(useProjectsStore.getState().episodeRevisions[episodeScriptRevisionKey("demo", 1)]).toBe(1);

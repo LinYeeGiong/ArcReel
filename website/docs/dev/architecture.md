@@ -52,7 +52,9 @@ flowchart TB
 | 设置页深链和返回目标 | `frontend/src/app-routes.ts` 与 `components/shared/page-shell/return-to.ts` |
 | 项目刷新和配置问题 | `frontend/src/stores/projects-store.ts` 负责合并刷新，写入操作后通过 `components/canvas/shared/refreshAfterWrite.ts` 触发刷新；`frontend/src/stores/config-status-store.ts` 按设置分区提供配置问题状态。 |
 
-工作台首屏接口 `GET /api/v1/projects/{name}/workspace` 返回项目账本、逐集摘要和资产指纹。摘要按清单登记与文件在场统计可用产物，单独报告待重新规划的视频单元数。单集剧本与资产图新鲜度由相应详情接口读取。资产页可用 `asset-sheets/status?include=derivative_references` 查询衍生引用，读取不完整且未找到引用时返回 `referenced: null`。
+工作台首屏接口 `GET /api/v1/projects/{name}/workspace` 返回项目账本、逐集摘要和资产指纹。摘要按清单登记与文件在场统计可用产物，单独报告待重新规划的视频单元数。单集脚本与资产图新鲜度由相应详情接口读取。资产页可用 `asset-sheets/status?include=derivative_references` 查询衍生引用，读取不完整且未找到引用时返回 `referenced: null`。
+
+单集变更时，客户端通过可重复的 `episodes` 查询参数读取指定集。局部响应只包含指定集的摘要行与局部媒体指纹，`episodes_summary` 为 `null`，客户端合并行后重新统计全项目进度。
 
 可见条目通过 `POST /api/v1/projects/{name}/item-locations` 批量定位。请求体 `{"item_ids":["E2S01","S01"]}` 最多含 200 个 ID。响应的 `items` 按请求顺序返回。位置从 1 开始，`status` 为 `found`、`deleted`、`ambiguous` 或 `unloaded`。索引随项目事件快照更新。
 

@@ -1,3 +1,4 @@
+import { stripScriptsPrefix } from "@/utils/task-target";
 import { useCallback } from "react";
 import { errMsg, voidPromise } from "@/utils/async";
 import { Route, Switch, Redirect } from "wouter";
@@ -109,10 +110,13 @@ export function StudioCanvasRouter() {
       currentProjectName
         ? useProjectsStore
             .getState()
-            .refreshProject(currentProjectName, { invalidateKeys })
+            .refreshProject(currentProjectName, {
+              invalidateKeys,
+              scope: activeEpisodeScript.episode ? { episodes: [activeEpisodeScript.episode] } : undefined,
+            })
             .then((result) => result === "success")
         : Promise.resolve(false),
-    [currentProjectName],
+    [currentProjectName, activeEpisodeScript.episode],
   );
 
   const refreshAfterAction = useCallback(
@@ -455,7 +459,7 @@ export function StudioCanvasRouter() {
         {(params) => {
           const epNum = parseInt(params.episodeId, 10);
           const episode = currentProjectData?.episodes?.find((e) => e.episode === epNum);
-          const scriptFile = episode?.script_file?.replace(/^scripts\//, "");
+          const scriptFile = episode?.script_file ? stripScriptsPrefix(episode.script_file) : undefined;
           const script = scriptFile ? (currentScripts[scriptFile] ?? null) : null;
           const scriptLoading =
             !demoMode &&
